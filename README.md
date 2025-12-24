@@ -10,7 +10,7 @@
 
 **Fun-Audio-Chat** is a Large Audio Language Model built for natural, low-latency voice interactions.
 
-[![Paper](https://img.shields.io/badge/Paper-PDF-red)](https://arxiv.org/pdf/2512.20156)
+[![arXiv](https://img.shields.io/badge/arXiv-2512.20156-red)](https://arxiv.org/pdf/2512.20156)
 [![HuggingFace](https://img.shields.io/badge/HuggingFace-Model-yellow)](https://huggingface.co/FunAudioLLM/Fun-Audio-Chat-8B)
 [![ModelScope](https://img.shields.io/badge/ModelScope-Model-orange)](https://modelscope.cn/FunAudioLLM/Fun-Audio-Chat-8B)
 [![Demo](https://img.shields.io/badge/Demo-Page-green)](https://funaudiollm.github.io/funaudiochat)
