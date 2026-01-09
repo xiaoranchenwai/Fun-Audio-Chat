@@ -243,6 +243,7 @@ class ServerState:
         client_id = f"Client-{id(ws)}"
         turn_counter = 0
         is_recording = True 
+        close = False
         
         # system_prompt for current session
         session_system_prompt = self.system_prompt
@@ -1083,7 +1084,6 @@ class ServerState:
             log("info", f"Text send coroutine stopped, total texts sent: {texts_sent}")
 
         log("info", "accepted connection")
-        close = False
         all_recorded_pcm = None  # Store all recorded PCM data
         all_generated_audio = []  # Store all generated audio segments
         audio_buffer_list = []  # Audio buffer between TTS process and main process
