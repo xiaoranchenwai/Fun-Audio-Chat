@@ -25,6 +25,7 @@ import sphn
 import soundfile as sf
 from datetime import datetime
 import torch
+from transformers import StoppingCriteria, StoppingCriteriaList
 import torchaudio
 import json
 import math
@@ -345,15 +346,18 @@ class ServerState:
 
         async def save_audio_loop():
             """Async tasks for handling audio saving and inference"""
-            nonlocal all_recorded_pcm, turn_counter, messages, audio_list, audio_buffer_list, audio_buffer_lock, all_generated_audio, reset_first_frame, reset_send_state, this_uuid, tts_offset, cur_audio_tokens, opus_reader, accumulate_tts_tokens
+            nonlocal all_recorded_pcm, turn_counter, messages, audio_list, audio_buffer_list, audio_buffer_lock, all_generated_audio, reset_first_frame, reset_send_state, this_uuid, tts_offset, cur_audio_tokens, opus_reader, accumulate_tts_tokens, close
             
             current_generation = {
                 'streamer': None,
                 'accumulated_text': '',
                 'generation_thread': None,
                 'is_generating': False,
-                'interrupt': False  
+                'interrupt': False,
+                'interrupt_event': threading.Event(),
+                'generation_done_event': threading.Event(),
             }
+            current_generation['generation_done_event'].set()
             
             while True:
                 if close:
@@ -440,7 +444,22 @@ class ServerState:
                             
                             generation_error = {'error': None}
                             generation_start_time = time.time()
-                            
+
+                            class InterruptStoppingCriteria(StoppingCriteria):
+                                def __init__(self, interrupt_event: threading.Event) -> None:
+                                    self._interrupt_event = interrupt_event
+
+                                def __call__(self, input_ids, scores, **kwargs) -> bool:
+                                    return self._interrupt_event.is_set()
+
+                            stopping_criteria = StoppingCriteriaList(
+                                gen_kwargs_with_streamer.get('stopping_criteria', [])
+                            )
+                            stopping_criteria.append(
+                                InterruptStoppingCriteria(current_generation['interrupt_event'])
+                            )
+                            gen_kwargs_with_streamer['stopping_criteria'] = stopping_criteria
+
                             def run_generation():
                                 try:
                                     log("info", f"[Turn {turn_counter}] Generation thread started, input_ids shape: {inputs['input_ids'].shape}")
@@ -453,7 +472,10 @@ class ServerState:
                                     log("error", f"[Turn {turn_counter}] Generation failed after {elapsed:.2f}s: {e}")
                                     import traceback
                                     traceback.print_exc()
+                                finally:
+                                    current_generation['generation_done_event'].set()
                             
+                            current_generation['generation_done_event'].clear()
                             generation_thread = Thread(target=run_generation)
                             generation_thread.start()
                             
@@ -551,6 +573,7 @@ class ServerState:
                                 current_generation['streamer'] = None
                                 current_generation['accumulated_text'] = ''
                                 current_generation['generation_thread'] = None
+                                current_generation['interrupt_event'].clear()
                                 continue 
                             
                             # Mark TTS generation as complete
@@ -638,12 +661,16 @@ class ServerState:
                         if current_generation['is_generating']:
                             log("info", "Interrupting current generation...")
                             current_generation['interrupt'] = True
+                            current_generation['interrupt_event'].set()
                             if current_generation['generation_thread'] is not None:
-                                current_generation['generation_thread'].join(timeout=2.0)
-                                if current_generation['generation_thread'].is_alive():
-                                    log("warning", "Generation thread did not stop in time")
+                                stopped = current_generation['generation_done_event'].wait(timeout=5.0)
+                                if not stopped and current_generation['generation_thread'].is_alive():
+                                    log("error", "Generation thread did not stop in time; closing connection to avoid concurrent generate")
+                                    close = True
+                                    return
                             current_generation['is_generating'] = False
                             current_generation['interrupt'] = False
+                            current_generation['interrupt_event'].clear()
                             log("info", "Previous generation stopped")
                         
                         all_recorded_pcm = None
@@ -940,13 +967,16 @@ class ServerState:
 
         async def send_audio_loop():
             """Async coroutine: Read encoded Opus data from the queue and send at fixed time intervals"""
-            nonlocal reset_send_state, audio_send_started
+            nonlocal reset_send_state, audio_send_started, close
             frame_interval = 0.010 
             next_send_time = None  
             frames_sent = 0  
             
             while not close:
                 try:
+                    if ws.closed:
+                        log("info", "WebSocket closed, stopping audio send loop")
+                        break
                     if reset_send_state['flag']:
                         next_send_time = None
                         frames_sent = 0
@@ -969,7 +999,15 @@ class ServerState:
                     if wait_time > 0:
                         await asyncio.sleep(wait_time)
                     
-                    await ws.send_bytes(b"\x01" + opus_bytes)
+                    if ws.closed:
+                        log("info", "WebSocket closed before sending audio frame")
+                        break
+                    try:
+                        await ws.send_bytes(b"\x01" + opus_bytes)
+                    except aiohttp.ClientConnectionResetError as e:
+                        log("warning", f"Connection reset while sending audio frame: {e}")
+                        close = True
+                        break
                     frames_sent += 1
                     
                     # When the first frame is sent, notify the text sending thread to start
